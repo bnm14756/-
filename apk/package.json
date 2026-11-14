@@ -1,0 +1,10 @@
+{
+  "name": "pleos-smart-motion-guard-apk",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "build:apk": "bash ./build-apk.sh",
+    "cap:sync": "npx cap sync android",
+    "twa:build": "npx @bubblewrap/cli build"
+  }
+}

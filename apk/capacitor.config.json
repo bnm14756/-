@@ -1,0 +1,9 @@
+{
+  "appId": "com.hyundai.pleos.motionguard",
+  "appName": "Pleos Smart Motion Guard",
+  "webDir": "../dist",
+  "android": {
+    "backgroundColor": "#0D1014",
+    "allowMixedContent": true
+  }
+}

@@ -20,6 +20,7 @@ export const TelemetryStrip: React.FC<TelemetryStripProps> = ({
   isDriving,
   isResting,
 }) => {
+  const isActivelyMoving = isDriving && !isResting && currentSpeed > 0;
   const isFuelEmpty = fuelPercent <= 0.5;
   const isFuelLow = fuelPercent > 0.5 && fuelPercent <= 20;
 
@@ -30,13 +31,15 @@ export const TelemetryStrip: React.FC<TelemetryStripProps> = ({
       sub: isResting ? '휴게소 정차 중' : isDriving ? '경부고속도로 하행 주행' : '대기 상태',
       icon: Route,
       tone: 'text-slate-100',
+      showLivePulse: false,
     },
     {
       label: '실시간 주행 속도',
       value: `${isResting || !isDriving ? 0 : currentSpeed} km/h`,
-      sub: isResting ? '변속기 P단 · 시동 대기' : '정속 크루즈 유지',
+      sub: isResting ? '변속기 P단 · 시동 대기' : isActivelyMoving ? '주행 중 · 정속 크루즈' : '일시 정차',
       icon: Gauge,
       tone: isResting ? 'text-slate-400' : 'text-blue-400',
+      showLivePulse: isActivelyMoving,
     },
     {
       label: '잔여 연료 · 에너지',
@@ -52,6 +55,7 @@ export const TelemetryStrip: React.FC<TelemetryStripProps> = ({
         : isFuelLow
           ? 'text-amber-400'
           : 'text-[#3EE84B]',
+      showLivePulse: false,
     },
     {
       label: '안전운전 점수',
@@ -59,6 +63,7 @@ export const TelemetryStrip: React.FC<TelemetryStripProps> = ({
       sub: safetyScore >= 90 ? '우수 등급 · EXP +10%' : '주의 구간 감지',
       icon: ShieldCheck,
       tone: safetyScore >= 90 ? 'text-emerald-400' : 'text-amber-400',
+      showLivePulse: false,
     },
     {
       label: '급가속 · 급제동',
@@ -66,26 +71,43 @@ export const TelemetryStrip: React.FC<TelemetryStripProps> = ({
       sub: harshEvents === 0 ? '관성 충격 0회 달성' : '부드러운 감속 권장',
       icon: Zap,
       tone: harshEvents === 0 ? 'text-emerald-400' : 'text-amber-400',
+      showLivePulse: false,
     },
   ];
 
   return (
     <section
       aria-label="실시간 차량 텔레메트리 요약"
-      className="bg-[#111826] border border-slate-800 rounded-xl grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5 divide-y sm:divide-y-0 sm:divide-x divide-slate-800"
+      className={`border rounded-xl grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5 divide-y sm:divide-y-0 sm:divide-x divide-slate-800/90 transition-colors duration-300 ${
+        isActivelyMoving ? 'telemetry-active-driving' : 'bg-[#111826] border-slate-800'
+      }`}
     >
       {metrics.map((item) => {
         const Icon = item.icon;
         return (
           <div key={item.label} className="p-4 sm:p-5 flex items-start justify-between gap-3">
             <div className="space-y-1 min-w-0">
-              <div className="text-xs text-slate-400 font-medium">{item.label}</div>
+              <div className="text-xs text-slate-400 font-medium flex items-center gap-1.5">
+                {item.showLivePulse && (
+                  <span className="relative flex h-2 w-2 shrink-0" aria-hidden="true">
+                    <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-[#3EE84B] opacity-75" />
+                    <span className="relative inline-flex rounded-full h-2 w-2 bg-[#3EE84B]" />
+                  </span>
+                )}
+                <span>{item.label}</span>
+              </div>
               <div className={`text-xl sm:text-2xl font-bold font-mono tabular-nums ${item.tone}`}>
                 {item.value}
               </div>
               <div className="text-xs text-slate-400 truncate">{item.sub}</div>
             </div>
-            <div className="p-2 rounded-lg bg-slate-900 border border-slate-800 text-slate-400 shrink-0">
+            <div
+              className={`p-2 rounded-lg border shrink-0 transition-colors ${
+                item.showLivePulse
+                  ? 'bg-blue-500/15 border-blue-400/40 text-blue-300'
+                  : 'bg-slate-900 border-slate-800 text-slate-400'
+              }`}
+            >
               <Icon size={17} aria-hidden="true" />
             </div>
           </div>

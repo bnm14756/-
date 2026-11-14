@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   Check,
   CheckCircle2,
@@ -6,8 +6,11 @@ import {
   Download,
   ExternalLink,
   FileArchive,
+  Loader2,
   PackageCheck,
+  Play,
   Smartphone,
+  Terminal,
   WifiOff,
   X,
 } from 'lucide-react';
@@ -29,6 +32,14 @@ export const OfflineIndicator: React.FC = () => {
   );
 };
 
+interface BuildLogEntry {
+  id: string;
+  stream: 'stdout' | 'stderr';
+  line: string;
+}
+
+type BuildPhase = 'idle' | 'building' | 'success' | 'error';
+
 interface AndroidAppModalProps {
   open: boolean;
   onClose: () => void;
@@ -38,8 +49,34 @@ interface AndroidAppModalProps {
 export const AndroidAppModal: React.FC<AndroidAppModalProps> = ({ open, onClose, onNotify }) => {
   const { isInstallable, isInstalled, isIOS, isInIframe, install } = usePWAInstall();
   const [installing, setInstalling] = useState(false);
+  const [downloadingApk, setDownloadingApk] = useState(false);
   const [downloadingKit, setDownloadingKit] = useState(false);
   const [copiedUrl, setCopiedUrl] = useState(false);
+
+  const [buildPhase, setBuildPhase] = useState<BuildPhase>('idle');
+  const [buildProgress, setBuildProgress] = useState(0);
+  const [buildLogs, setBuildLogs] = useState<BuildLogEntry[]>([]);
+  const [builtApkBytes, setBuiltApkBytes] = useState<number | null>(null);
+
+  const eventSourceRef = useRef<EventSource | null>(null);
+  const consoleEndRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    consoleEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [buildLogs]);
+
+  useEffect(() => {
+    if (!open && eventSourceRef.current) {
+      eventSourceRef.current.close();
+      eventSourceRef.current = null;
+    }
+    return () => {
+      if (eventSourceRef.current) {
+        eventSourceRef.current.close();
+        eventSourceRef.current = null;
+      }
+    };
+  }, [open]);
 
   if (!open) return null;
 
@@ -47,6 +84,7 @@ export const AndroidAppModal: React.FC<AndroidAppModalProps> = ({ open, onClose,
     typeof window !== 'undefined' ? window.location.origin : 'https://localhost:3000';
   const currentUrl =
     typeof window !== 'undefined' ? window.location.href : 'https://localhost:3000/';
+  const dummyApkDownloadUrl = '/api/mobile/pleos-guard.apk';
   const apkKitDownloadUrl = `/api/mobile/android-apk-kit.zip?origin=${encodeURIComponent(
     currentOrigin
   )}`;
@@ -71,6 +109,116 @@ export const AndroidAppModal: React.FC<AndroidAppModalProps> = ({ open, onClose,
     } finally {
       setInstalling(false);
     }
+  };
+
+  const handleDownloadDummyApk = async () => {
+    setDownloadingApk(true);
+    try {
+      const res = await fetch(dummyApkDownloadUrl);
+      if (!res.ok) throw new Error('APK download failed');
+      const blob = await res.blob();
+      const blobUrl = URL.createObjectURL(blob);
+      const anchor = document.createElement('a');
+      anchor.href = blobUrl;
+      anchor.download = 'pleos-guard.apk';
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      URL.revokeObjectURL(blobUrl);
+      onNotify?.(
+        'pleos-guard.apk 다운로드 완료',
+        '시뮬레이션 빌드 환경(build-apk.sh)으로 생성된 테스트용 APK 아티팩트가 다운로드되었습니다.',
+        'success'
+      );
+    } catch {
+      onNotify?.(
+        '다운로드 실패',
+        'pleos-guard.apk 파일을 내려받지 못했습니다. 잠시 후 다시 시도해 주세요.',
+        'warning'
+      );
+    } finally {
+      setDownloadingApk(false);
+    }
+  };
+
+  const handleRunSimulatedBuild = () => {
+    if (eventSourceRef.current) {
+      eventSourceRef.current.close();
+      eventSourceRef.current = null;
+    }
+
+    setBuildPhase('building');
+    setBuildProgress(10);
+    setBuiltApkBytes(null);
+    setBuildLogs([
+      {
+        id: `init-${Date.now()}`,
+        stream: 'stdout',
+        line: '[build-status] Connecting to Android simulated build runner...',
+      },
+    ]);
+
+    const es = new EventSource('/api/mobile/build-apk/stream');
+    eventSourceRef.current = es;
+
+    es.onmessage = (event) => {
+      try {
+        const data = JSON.parse(event.data) as
+          | { type: 'log'; stream: 'stdout' | 'stderr'; line: string }
+          | { type: 'done'; exitCode: number; sizeBytes: number };
+
+        if (data.type === 'log') {
+          setBuildLogs((prev) => [
+            ...prev,
+            {
+              id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+              stream: data.stream,
+              line: data.line,
+            },
+          ]);
+          if (data.line.includes('[1/4]')) setBuildProgress(25);
+          else if (data.line.includes('[2/4]')) setBuildProgress(50);
+          else if (data.line.includes('[3/4]')) setBuildProgress(78);
+          else if (data.line.includes('[4/4]')) setBuildProgress(100);
+        } else if (data.type === 'done') {
+          es.close();
+          eventSourceRef.current = null;
+          if (data.exitCode === 0) {
+            setBuildPhase('success');
+            setBuildProgress(100);
+            setBuiltApkBytes(data.sizeBytes);
+            onNotify?.(
+              'APK 빌드 완료 (pleos-guard.apk)',
+              `시뮬레이션 빌드가 성공했습니다 (${Math.round(data.sizeBytes / 1024)} KB). 다운로드 버튼으로 내려받으세요.`,
+              'success'
+            );
+          } else {
+            setBuildPhase('error');
+            onNotify?.(
+              'APK 빌드 실패',
+              'Build Status 콘솔 로그를 확인해 주세요.',
+              'warning'
+            );
+          }
+        }
+      } catch {
+        // Ignore malformed SSE payload
+      }
+    };
+
+    es.onerror = () => {
+      es.close();
+      eventSourceRef.current = null;
+      setBuildPhase((prev) => (prev === 'building' ? 'error' : prev));
+      setBuildLogs((prev) => [
+        ...prev,
+        {
+          id: `err-${Date.now()}`,
+          stream: 'stderr',
+          line: '[build-status] Connection closed during build stream.',
+        },
+      ]);
+    };
   };
 
   const handleDownloadKit = async () => {
@@ -136,7 +284,7 @@ export const AndroidAppModal: React.FC<AndroidAppModalProps> = ({ open, onClose,
                 Android 앱 설치 &amp; APK 다운로드 센터
               </h2>
               <p className="text-xs text-slate-300 truncate">
-                WebAPK 즉시 설치 · TWA / Capacitor Android APK 빌드 키트 (.zip)
+                WebAPK 즉시 설치 · pleos-guard.apk 아티팩트 · APK 빌드 키트 (.zip)
               </p>
             </div>
           </div>
@@ -161,7 +309,7 @@ export const AndroidAppModal: React.FC<AndroidAppModalProps> = ({ open, onClose,
                 </h3>
               </div>
               <span className="text-[11px] font-bold px-2.5 py-0.5 rounded-full bg-emerald-500/15 text-[#3EE84B] border border-emerald-500/30">
-                권장 · 별도 빌드 불필요
+                실제 기기 설치 가능
               </span>
             </div>
 
@@ -227,27 +375,119 @@ export const AndroidAppModal: React.FC<AndroidAppModalProps> = ({ open, onClose,
             )}
           </section>
 
-          {/* Path 2: Downloadable Android APK Build Kit (.zip) */}
+          {/* Path 2: Simulated APK Artifact + Build Status Console + Build Kit (.zip) */}
           <section className="rounded-xl bg-[#161D28] border border-white/12 p-4 space-y-3">
             <div className="flex flex-wrap items-center justify-between gap-2">
               <div className="flex items-center gap-2">
                 <FileArchive size={18} className="text-[#7CC4FF]" aria-hidden="true" />
                 <h3 className="text-sm font-extrabold text-white">
-                  2. Android APK 빌드 키트 다운로드 (.zip)
+                  2. APK 아티팩트 빌드 &amp; 다운로드 센터
                 </h3>
               </div>
               <span className="text-[11px] font-semibold px-2.5 py-0.5 rounded-full bg-blue-500/15 text-[#7CC4FF] border border-blue-500/30">
-                TWA (Bubblewrap) + Capacitor 포함
+                build-apk.sh · apk/pleos-guard.apk
               </span>
             </div>
 
             <p className="text-xs text-slate-300 leading-relaxed">
-              현재 클라우드 실행 서버에는 Android SDK·JDK·Gradle 서명 도구가 포함되어 있지 않아
-              서버에서 직접 <code className="text-slate-200">.apk</code> 바이너리를 서명·컴파일할
-              수 없습니다. 대신 이 앱의 live 주소와 현대자동차그룹 Pleos 아이콘·매니페스트가 사전
-              설정된 <strong className="text-white">Android APK 빌드 패키지(.zip)</strong>를 바로
-              내려받을 수 있습니다.
+              루트 <code className="text-[#7CC4FF]">build-apk.sh</code> 스크립트를 실행해{' '}
+              <code className="text-slate-100">apk/pleos-guard.apk</code> 아티팩트를 생성하고
+              실시간 빌드 로그를 확인할 수 있습니다. (시뮬레이션 빌드 환경의 테스트용 더미 APK이므로
+              실제 단말기 설치는 위 1번 WebAPK 또는{' '}
+              <code className="text-[#7CC4FF]">apk/github-workflow-template.yml</code> 기반 서명
+              빌드를 이용하세요.)
             </p>
+
+            {/* Build Status Log Console */}
+            <div className="rounded-xl bg-[#090D14] border border-white/12 overflow-hidden">
+              <div className="px-3.5 py-2 border-b border-white/10 bg-[#0F1622] flex items-center justify-between gap-2">
+                <div className="flex items-center gap-2">
+                  <Terminal size={14} className="text-[#7CC4FF]" aria-hidden="true" />
+                  <span className="text-xs font-extrabold tracking-wide text-white">
+                    Build Status
+                  </span>
+                </div>
+                <div className="flex items-center gap-2">
+                  {buildPhase === 'building' && (
+                    <span className="inline-flex items-center gap-1.5 text-[11px] font-bold text-amber-300">
+                      <Loader2 size={12} className="animate-spin" aria-hidden="true" />
+                      <span>BUILDING · {buildProgress}%</span>
+                    </span>
+                  )}
+                  {buildPhase === 'success' && (
+                    <span className="inline-flex items-center gap-1 text-[11px] font-bold text-[#3EE84B]">
+                      <CheckCircle2 size={12} aria-hidden="true" />
+                      <span>
+                        SUCCESS
+                        {builtApkBytes ? ` · ${Math.round(builtApkBytes / 1024)} KB` : ''}
+                      </span>
+                    </span>
+                  )}
+                  {buildPhase === 'error' && (
+                    <span className="text-[11px] font-bold text-red-400">FAILED</span>
+                  )}
+                  {buildPhase === 'idle' && (
+                    <span className="text-[11px] font-medium text-slate-400">READY</span>
+                  )}
+                </div>
+              </div>
+
+              {/* Progress Bar */}
+              <div className="h-1 w-full bg-slate-800">
+                <div
+                  className={`h-full transition-all duration-300 ${
+                    buildProgress >= 100
+                      ? 'w-full'
+                      : buildProgress >= 75
+                        ? 'w-3/4'
+                        : buildProgress >= 50
+                          ? 'w-1/2'
+                          : buildProgress >= 25
+                            ? 'w-1/4'
+                            : buildProgress > 0
+                              ? 'w-[10%]'
+                              : 'w-0'
+                  } ${
+                    buildPhase === 'success'
+                      ? 'bg-[#3EE84B]'
+                      : buildPhase === 'error'
+                        ? 'bg-red-500'
+                        : 'bg-[#0070F3]'
+                  }`}
+                />
+              </div>
+
+              {/* Scrollable Log Output */}
+              <div
+                aria-live="polite"
+                className="p-3 max-h-44 overflow-y-auto font-mono text-[11px] leading-relaxed space-y-1 text-slate-300"
+              >
+                {buildLogs.length === 0 ? (
+                  <div className="text-slate-500">
+                    &gt; &ldquo;APK 빌드 실행 (build-apk.sh)&rdquo; 버튼을 누르면 실시간 빌드
+                    진행 로그가 여기에 표시됩니다.
+                  </div>
+                ) : (
+                  buildLogs.map((entry) => (
+                    <div
+                      key={entry.id}
+                      className={
+                        entry.stream === 'stderr'
+                          ? 'text-amber-300'
+                          : entry.line.includes('[4/4]') || entry.line.includes('Packaged')
+                            ? 'text-[#3EE84B]'
+                            : entry.line.startsWith('$ ')
+                              ? 'text-[#7CC4FF] font-semibold'
+                              : 'text-slate-200'
+                      }
+                    >
+                      {entry.line}
+                    </div>
+                  ))
+                )}
+                <div ref={consoleEndRef} />
+              </div>
+            </div>
 
             <div className="rounded-xl bg-black/30 border border-white/10 p-3 flex flex-wrap items-center justify-between gap-2">
               <div className="min-w-0">
@@ -265,6 +505,40 @@ export const AndroidAppModal: React.FC<AndroidAppModalProps> = ({ open, onClose,
             </div>
 
             <div className="flex flex-wrap items-center gap-2.5">
+              <button
+                type="button"
+                disabled={buildPhase === 'building'}
+                onClick={handleRunSimulatedBuild}
+                className="px-4 py-2.5 rounded-xl bg-emerald-500 hover:bg-emerald-400 disabled:opacity-60 text-slate-950 text-xs font-extrabold flex items-center gap-2 transition-colors"
+              >
+                {buildPhase === 'building' ? (
+                  <Loader2 size={15} className="animate-spin" aria-hidden="true" />
+                ) : (
+                  <Play size={14} aria-hidden="true" />
+                )}
+                <span>
+                  {buildPhase === 'building'
+                    ? 'APK 빌드 진행 중...'
+                    : 'APK 빌드 실행 (build-apk.sh)'}
+                </span>
+              </button>
+
+              <button
+                type="button"
+                disabled={downloadingApk || buildPhase === 'building'}
+                onClick={handleDownloadDummyApk}
+                className={`px-4 py-2.5 rounded-xl disabled:opacity-60 text-xs font-extrabold flex items-center gap-2 transition-colors ${
+                  buildPhase === 'success'
+                    ? 'bg-[#3EE84B] hover:bg-[#32D43E] text-[#071809]'
+                    : 'bg-[#0070F3] hover:bg-blue-600 text-white'
+                }`}
+              >
+                <Download size={15} aria-hidden="true" />
+                <span>
+                  {downloadingApk ? 'APK 준비 중...' : 'pleos-guard.apk 다운로드 (테스트용)'}
+                </span>
+              </button>
+
               <button
                 type="button"
                 disabled={downloadingKit}

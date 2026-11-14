@@ -1,5 +1,6 @@
 import dotenv from 'dotenv';
 import express from 'express';
+import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
@@ -500,6 +501,105 @@ async function startServer() {
   const httpServer = http.createServer(app);
   app.use(express.json());
 
+  app.get('/api/mobile/build-apk/stream', (req, res) => {
+    res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
+    res.setHeader('Cache-Control', 'no-cache, no-transform');
+    res.setHeader('Connection', 'keep-alive');
+    res.flushHeaders?.();
+
+    const sendEvent = (payload: Record<string, unknown>) => {
+      if (!res.writableEnded) {
+        res.write(`data: ${JSON.stringify(payload)}\n\n`);
+      }
+    };
+
+    const scriptPath = path.resolve(__dirname, 'build-apk.sh');
+    if (!fs.existsSync(scriptPath)) {
+      sendEvent({ type: 'log', stream: 'stderr', line: 'Error: build-apk.sh not found in workspace root.' });
+      sendEvent({ type: 'done', exitCode: 1, sizeBytes: 0 });
+      res.end();
+      return;
+    }
+
+    sendEvent({ type: 'log', stream: 'stdout', line: '$ bash build-apk.sh' });
+    const child = spawn('bash', [scriptPath], { cwd: __dirname });
+
+    let stdoutBuf = '';
+    let stderrBuf = '';
+
+    const emitLines = (chunk: Buffer, stream: 'stdout' | 'stderr', isStdOut: boolean) => {
+      const combined = (isStdOut ? stdoutBuf : stderrBuf) + chunk.toString('utf8');
+      const parts = combined.split(/\r?\n/);
+      const trailing = parts.pop() ?? '';
+      if (isStdOut) stdoutBuf = trailing;
+      else stderrBuf = trailing;
+
+      for (const line of parts) {
+        if (line.trim().length > 0) {
+          sendEvent({ type: 'log', stream, line });
+        }
+      }
+    };
+
+    child.stdout.on('data', (chunk: Buffer) => emitLines(chunk, 'stdout', true));
+    child.stderr.on('data', (chunk: Buffer) => emitLines(chunk, 'stderr', false));
+
+    child.on('close', (code) => {
+      if (stdoutBuf.trim()) sendEvent({ type: 'log', stream: 'stdout', line: stdoutBuf.trim() });
+      if (stderrBuf.trim()) sendEvent({ type: 'log', stream: 'stderr', line: stderrBuf.trim() });
+      const apkPath = path.resolve(__dirname, 'apk', 'pleos-guard.apk');
+      const sizeBytes = fs.existsSync(apkPath) ? fs.statSync(apkPath).size : 0;
+      sendEvent({ type: 'done', exitCode: code ?? 0, sizeBytes });
+      if (!res.writableEnded) res.end();
+    });
+
+    child.on('error', (err) => {
+      sendEvent({ type: 'log', stream: 'stderr', line: `Spawn error: ${err.message}` });
+      sendEvent({ type: 'done', exitCode: 1, sizeBytes: 0 });
+      if (!res.writableEnded) res.end();
+    });
+
+    req.on('close', () => {
+      if (!child.killed) {
+        child.kill('SIGTERM');
+      }
+    });
+  });
+
+  app.get('/api/mobile/pleos-guard.apk', (_req, res) => {
+    const apkPath = path.resolve(__dirname, 'apk', 'pleos-guard.apk');
+    if (fs.existsSync(apkPath)) {
+      const apkBuffer = fs.readFileSync(apkPath);
+      res.setHeader('Content-Type', 'application/vnd.android.package-archive');
+      res.setHeader('Content-Disposition', 'attachment; filename="pleos-guard.apk"');
+      res.setHeader('Content-Length', String(apkBuffer.length));
+      res.send(apkBuffer);
+      return;
+    }
+
+    const fallbackEntries = [
+      {
+        name: 'AndroidManifest.xml',
+        data: Buffer.from(
+          '<?xml version="1.0" encoding="utf-8"?><manifest package="com.hyundai.pleos.motionguard"><application android:label="Pleos Smart Motion Guard" /></manifest>',
+          'utf8'
+        ),
+      },
+      {
+        name: 'BUILD-INFO.txt',
+        data: Buffer.from(
+          'Pleos Smart Motion Guard — Simulated APK Artifact (run ./build-apk.sh to regenerate)',
+          'utf8'
+        ),
+      },
+    ];
+    const fallbackZip = buildZipArchive(fallbackEntries);
+    res.setHeader('Content-Type', 'application/vnd.android.package-archive');
+    res.setHeader('Content-Disposition', 'attachment; filename="pleos-guard.apk"');
+    res.setHeader('Content-Length', String(fallbackZip.length));
+    res.send(fallbackZip);
+  });
+
   app.get('/api/mobile/android-apk-kit.zip', (req, res) => {
     const originUrl = sanitizeOriginUrl(
       typeof req.query.origin === 'string' ? req.query.origin : req.get('origin'),
@@ -625,6 +725,15 @@ Android Chrome에서 \`${originUrl}\` 접속 후 메뉴(⋮) → **앱 설치** 
           compress: asset.compress,
         });
       }
+    }
+
+    const workflowPath = path.resolve(__dirname, 'apk', 'github-workflow-template.yml');
+    if (fs.existsSync(workflowPath)) {
+      entries.push({
+        name: '.github/workflows/build-android-apk.yml',
+        data: fs.readFileSync(workflowPath),
+        compress: true,
+      });
     }
 
     const zipBuffer = buildZipArchive(entries);
