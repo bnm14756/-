@@ -1,4 +1,7 @@
 # Pleos Smart Motion Guard — Android APK 폴더 (`apk/`)
+contest-application-consent 스마트카 성장앱 (장거리 스마트 드라이빙 앱) 김종환
+
+정말 열심히 만들었습니다!!
 
 이 폴더에는 Android `.apk` 빌드를 위한 Capacitor / TWA(Bubblewrap) 설정 파일과 빌드 스크립트**, 그리고 시뮬레이션 빌드 아티팩트(`pleos-guard.apk`)가 포함되어 있습니다.
 
