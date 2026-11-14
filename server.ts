@@ -148,49 +148,70 @@ type WeatherCondition = 'clear' | 'rain' | 'snow' | 'fog';
 interface CrewMemberState {
   id: string;
   callsign: string;
+  friendCode: string;
   vehicleName: string;
   level: number;
   kmMarker: number;
   fuelPercent: number;
   needsHelp: boolean;
+  isFriend: boolean;
 }
 
 const CREW_MEMBERS_STATE: CrewMemberState[] = [
   {
     id: 'crew-ioniq6',
     callsign: '아이오닉6_수원',
+    friendCode: 'HYN-4021',
     vehicleName: '아이오닉 플래그십 패밀리 SUV',
     level: 4,
     kmMarker: 144.8,
     fuelPercent: 18,
     needsHelp: true,
-  },
-  {
-    id: 'crew-casper',
-    callsign: '캐스퍼_분당크루',
-    vehicleName: '캐스퍼 스타일 시티 콤팩트',
-    level: 1,
-    kmMarker: 151.2,
-    fuelPercent: 12,
-    needsHelp: true,
+    isFriend: true,
   },
   {
     id: 'crew-grandeur',
     callsign: '그랜저_대전장거리',
+    friendCode: 'HYN-7782',
     vehicleName: '그랜저 스타일 플래그십 세단',
     level: 5,
     kmMarker: 168.4,
     fuelPercent: 82,
     needsHelp: false,
+    isFriend: true,
+  },
+  {
+    id: 'crew-casper',
+    callsign: '캐스퍼_분당크루',
+    friendCode: 'HYN-1190',
+    vehicleName: '캐스퍼 스타일 시티 콤팩트',
+    level: 1,
+    kmMarker: 151.2,
+    fuelPercent: 12,
+    needsHelp: true,
+    isFriend: false,
   },
   {
     id: 'crew-avante',
     callsign: '아반떼_천안출근러',
+    friendCode: 'HYN-5543',
     vehicleName: '아반떼 스타일 스마트 세단',
     level: 2,
     kmMarker: 139.0,
     fuelPercent: 74,
     needsHelp: false,
+    isFriend: false,
+  },
+  {
+    id: 'crew-tucson',
+    callsign: '코나EV_판교러너',
+    friendCode: 'HYN-3309',
+    vehicleName: '코나 일렉트릭 크로스오버',
+    level: 3,
+    kmMarker: 158.6,
+    fuelPercent: 24,
+    needsHelp: true,
+    isFriend: false,
   },
 ];
 
@@ -514,12 +535,81 @@ async function startServer() {
     });
   });
 
+  app.post('/api/social/friends/add', (req, res) => {
+    const body = (req.body ?? {}) as {
+      targetId?: string;
+      callsignOrCode?: string;
+    };
+    const rawQuery = (body.callsignOrCode ?? '').trim();
+
+    if (body.targetId) {
+      const existing = CREW_MEMBERS_STATE.find((m) => m.id === body.targetId);
+      if (!existing) {
+        res.status(404).json({ error: '드라이버를 찾을 수 없습니다.' });
+        return;
+      }
+      existing.isFriend = true;
+      res.json({ added: existing, crew: CREW_MEMBERS_STATE });
+      return;
+    }
+
+    if (!rawQuery) {
+      res.status(400).json({ error: '친구 닉네임 또는 친구 코드를 입력해 주세요.' });
+      return;
+    }
+
+    const normalized = rawQuery.toLowerCase();
+    const matched = CREW_MEMBERS_STATE.find(
+      (m) =>
+        m.callsign.toLowerCase() === normalized ||
+        m.friendCode.toLowerCase() === normalized
+    );
+
+    if (matched) {
+      matched.isFriend = true;
+      res.json({ added: matched, crew: CREW_MEMBERS_STATE });
+      return;
+    }
+
+    const isCodeInput = /^HYN-\d{3,5}$/i.test(rawQuery);
+    const newMember: CrewMemberState = {
+      id: `friend-${Date.now()}`,
+      callsign: isCodeInput ? `드라이버_${rawQuery.toUpperCase()}` : rawQuery,
+      friendCode: isCodeInput
+        ? rawQuery.toUpperCase()
+        : `HYN-${Math.floor(1000 + Math.random() * 8999)}`,
+      vehicleName: '아이오닉 5 N 라인 · 스마트 커넥트',
+      level: 3,
+      kmMarker: Number((140 + Math.random() * 45).toFixed(1)),
+      fuelPercent: 22,
+      needsHelp: true,
+      isFriend: true,
+    };
+    CREW_MEMBERS_STATE.unshift(newMember);
+    res.json({ added: newMember, crew: CREW_MEMBERS_STATE });
+  });
+
+  app.post('/api/social/friends/remove', (req, res) => {
+    const body = (req.body ?? {}) as { targetId?: string };
+    const member = CREW_MEMBERS_STATE.find((m) => m.id === body.targetId);
+    if (!member) {
+      res.status(404).json({ error: '친구를 찾을 수 없습니다.' });
+      return;
+    }
+    member.isFriend = false;
+    res.json({ removedId: member.id, crew: CREW_MEMBERS_STATE });
+  });
+
   app.post('/api/social/send-fuel', (req, res) => {
     const body = (req.body ?? {}) as { targetId?: string; amountPct?: number };
     const amountPct = Math.min(Math.max(Number(body.amountPct ?? 15), 5), 30);
     const member = CREW_MEMBERS_STATE.find((m) => m.id === body.targetId);
     if (!member) {
       res.status(404).json({ error: '대상 드라이버를 찾을 수 없습니다.' });
+      return;
+    }
+    if (!member.isFriend) {
+      res.status(400).json({ error: '친구로 추가된 드라이버에게만 기름을 보낼 수 있습니다.' });
       return;
     }
     member.fuelPercent = Math.min(100, member.fuelPercent + amountPct);
@@ -533,10 +623,16 @@ async function startServer() {
   });
 
   app.post('/api/social/request-fuel', (_req, res) => {
-    const donors = CREW_MEMBERS_STATE.filter((m) => m.fuelPercent >= 45);
-    const donor = donors[Math.floor(Math.random() * donors.length)] ?? CREW_MEMBERS_STATE[2];
+    const donors = CREW_MEMBERS_STATE.filter((m) => m.isFriend && m.fuelPercent >= 35);
+    if (donors.length === 0) {
+      res.status(400).json({
+        error: '현재 여유 연료가 있는 친구가 없습니다. 친구를 추가하거나 주유소를 이용하세요.',
+      });
+      return;
+    }
+    const donor = donors[Math.floor(Math.random() * donors.length)];
     const giftPct = 25;
-    donor.fuelPercent = Math.max(20, donor.fuelPercent - giftPct);
+    donor.fuelPercent = Math.max(15, donor.fuelPercent - giftPct);
     donor.needsHelp = donor.fuelPercent < 25;
     res.json({
       donorCallsign: donor.callsign,

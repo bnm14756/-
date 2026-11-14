@@ -143,11 +143,13 @@ export interface WeatherApiResponse {
 export interface CrewMember {
   id: string;
   callsign: string;
+  friendCode: string;
   vehicleName: string;
   level: number;
   kmMarker: number;
   fuelPercent: number;
   needsHelp: boolean;
+  isFriend: boolean;
 }
 
 export interface FuelTransferLog {

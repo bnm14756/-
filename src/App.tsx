@@ -908,18 +908,25 @@ export default function App() {
     let giftPct = 25;
     try {
       const res = await fetch('/api/social/request-fuel', { method: 'POST' });
-      if (res.ok) {
-        const data = (await res.json()) as {
-          donorCallsign: string;
-          giftPct: number;
-          crew: CrewMember[];
-        };
-        donorCallsign = data.donorCallsign;
-        giftPct = data.giftPct;
-        setCrewMembers(data.crew);
+      if (!res.ok) {
+        const errData = (await res.json().catch(() => ({}))) as { error?: string };
+        pushToast(
+          '기름 요청 안내',
+          errData.error ?? '여유 연료가 있는 친구가 없습니다. 친구를 추가해보세요.',
+          'warning'
+        );
+        return;
       }
+      const data = (await res.json()) as {
+        donorCallsign: string;
+        giftPct: number;
+        crew: CrewMember[];
+      };
+      donorCallsign = data.donorCallsign;
+      giftPct = data.giftPct;
+      setCrewMembers(data.crew);
     } catch {
-      // Fallback gift
+      // Fallback gift if offline
     } finally {
       setRequestingFuel(false);
     }
@@ -956,11 +963,89 @@ export default function App() {
       ...prev,
     ]);
     pushToast(
-      `긴급 연료 도착 (+${giftPct}%)`,
-      `${donorCallsign}님이 기름을 보내주어 연료가 ${nextFuel}%가 되었습니다!`,
+      `친구 긴급 연료 도착 (+${giftPct}%)`,
+      `친구 ${donorCallsign}님이 기름을 보내주어 연료가 ${nextFuel}%가 되었습니다!`,
       'success'
     );
   }, [pushToast]);
+
+  const handleAddFriendByInput = useCallback(
+    async (callsignOrCode: string) => {
+      try {
+        const res = await fetch('/api/social/friends/add', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ callsignOrCode }),
+        });
+        if (!res.ok) {
+          const errData = (await res.json().catch(() => ({}))) as { error?: string };
+          pushToast('친구 추가 실패', errData.error ?? '입력을 확인해 주세요.', 'warning');
+          return;
+        }
+        const data = (await res.json()) as {
+          added: CrewMember;
+          crew: CrewMember[];
+        };
+        setCrewMembers(data.crew);
+        pushToast(
+          '친구 추가 완료',
+          `${data.added.callsign} (${data.added.friendCode})님이 친구 목록에 추가되었습니다. 이제 서로 기름을 보낼 수 있습니다!`,
+          'success'
+        );
+      } catch {
+        pushToast('네트워크 오류', '친구 추가 요청을 처리하지 못했습니다.', 'warning');
+      }
+    },
+    [pushToast]
+  );
+
+  const handleAddFriendById = useCallback(
+    async (member: CrewMember) => {
+      try {
+        const res = await fetch('/api/social/friends/add', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ targetId: member.id }),
+        });
+        if (res.ok) {
+          const data = (await res.json()) as { added: CrewMember; crew: CrewMember[] };
+          setCrewMembers(data.crew);
+          pushToast(
+            '친구 추가 완료',
+            `${data.added.callsign}님과 친구가 되었습니다! 기름 보내기가 활성화됩니다.`,
+            'success'
+          );
+        }
+      } catch {
+        setCrewMembers((prev) =>
+          prev.map((m) => (m.id === member.id ? { ...m, isFriend: true } : m))
+        );
+      }
+    },
+    [pushToast]
+  );
+
+  const handleRemoveFriend = useCallback(
+    async (member: CrewMember) => {
+      try {
+        const res = await fetch('/api/social/friends/remove', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ targetId: member.id }),
+        });
+        if (res.ok) {
+          const data = (await res.json()) as { crew: CrewMember[] };
+          setCrewMembers(data.crew);
+        }
+      } catch {
+        setCrewMembers((prev) =>
+          prev.map((m) => (m.id === member.id ? { ...m, isFriend: false } : m))
+        );
+      }
+      pushToast('친구 해제', `${member.callsign}님이 친구 목록에서 해제되었습니다.`, 'info');
+    },
+    [pushToast]
+  );
 
   const handleSimulateLowFuel = useCallback(
     (level: number) => {
@@ -1253,6 +1338,9 @@ export default function App() {
               requestingFuel={requestingFuel}
               onSendFuel={(member) => void handleSendFuel(member)}
               onRequestFuelFromCrew={() => void handleRequestFuelFromCrew()}
+              onAddFriendByInput={handleAddFriendByInput}
+              onAddFriendById={handleAddFriendById}
+              onRemoveFriend={handleRemoveFriend}
               onSimulateLowFuel={handleSimulateLowFuel}
               onRefuelAtNearestStation={handleRefuelAtNearestStation}
             />
@@ -1365,6 +1453,9 @@ export default function App() {
               requestingFuel={requestingFuel}
               onSendFuel={(member) => void handleSendFuel(member)}
               onRequestFuelFromCrew={() => void handleRequestFuelFromCrew()}
+              onAddFriendByInput={handleAddFriendByInput}
+              onAddFriendById={handleAddFriendById}
+              onRemoveFriend={handleRemoveFriend}
               onSimulateLowFuel={handleSimulateLowFuel}
               onRefuelAtNearestStation={handleRefuelAtNearestStation}
             />
