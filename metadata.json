@@ -1,0 +1,6 @@
+{
+  "name": "Pleos Smart Motion Guard",
+  "description": "장거리 화물 및 상용차 운전자의 법정 의무 휴식 케어(2시간 주행/15분 휴식), 안전운전 기반 내 차 육성, 동승자 공동 뮤직 시스템을 제공하는 스마트 드라이빙 대시보드",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
