@@ -4,6 +4,7 @@ import {
   CarFront,
   CheckCircle2,
   Coffee,
+  Download,
   FastForward,
   Home,
   Music,
@@ -16,6 +17,7 @@ import {
   Vibrate,
   X,
 } from 'lucide-react';
+import { AndroidAppModal, OfflineIndicator } from './components/AndroidAppModal';
 import { CarPlaySplitView } from './components/CarPlaySplitView';
 import { CoPilotMusicPanel } from './components/CoPilotMusicPanel';
 import { DriveLogTable } from './components/DriveLogTable';
@@ -100,6 +102,7 @@ export default function App() {
   const [twoHourAlertVisible, setTwoHourAlertVisible] = useState(false);
   const [isVibratingVisual, setIsVibratingVisual] = useState(false);
   const [floatingWidgetOpen, setFloatingWidgetOpen] = useState(false);
+  const [apkModalOpen, setApkModalOpen] = useState(false);
   const twoHourAlertTriggeredRef = useRef(false);
 
   // 2. Multi-vehicle evolution state: LV.1 small compact car -> LV.6 GT sports car
@@ -1089,13 +1092,23 @@ export default function App() {
             >
               <HyundaiBrandMark size="lg" showWordmark />
             </button>
-            <div className="hidden sm:block text-right">
-              <div className="text-xs font-extrabold tracking-wide text-white">
-                Pleos Smart Motion Guard
+            <div className="flex items-center gap-3">
+              <div className="hidden md:block text-right">
+                <div className="text-xs font-extrabold tracking-wide text-white">
+                  Pleos Smart Motion Guard
+                </div>
+                <div className="text-[11px] text-slate-300">
+                  현대자동차그룹 스마트 모빌리티 · 안전휴식 · 연료 크루 플랫폼
+                </div>
               </div>
-              <div className="text-[11px] text-slate-300">
-                현대자동차그룹 스마트 모빌리티 · 안전휴식 · 연료 크루 플랫폼
-              </div>
+              <button
+                type="button"
+                onClick={() => setApkModalOpen(true)}
+                className="px-3.5 py-2 rounded-xl bg-white/10 hover:bg-white/20 border border-white/20 text-white text-xs font-extrabold flex items-center gap-1.5 whitespace-nowrap shrink-0 transition-colors"
+              >
+                <Download size={14} className="text-[#7CC4FF]" aria-hidden="true" />
+                <span>앱 / APK 다운</span>
+              </button>
             </div>
           </div>
         </div>
@@ -1676,6 +1689,12 @@ export default function App() {
           ))}
         </div>
       )}
+      <AndroidAppModal
+        open={apkModalOpen}
+        onClose={() => setApkModalOpen(false)}
+        onNotify={pushToast}
+      />
+      <OfflineIndicator />
     </div>
   );
 }

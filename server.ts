@@ -1,7 +1,10 @@
 import dotenv from 'dotenv';
 import express from 'express';
+import fs from 'node:fs';
+import http from 'node:http';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { deflateRawSync } from 'node:zlib';
 
 dotenv.config();
 
@@ -387,9 +390,252 @@ async function probeKtdbPortalReachability(): Promise<boolean> {
   }
 }
 
+const CRC32_TABLE = (() => {
+  const table = new Uint32Array(256);
+  for (let i = 0; i < 256; i++) {
+    let c = i;
+    for (let k = 0; k < 8; k++) {
+      c = (c & 1) !== 0 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+    }
+    table[i] = c >>> 0;
+  }
+  return table;
+})();
+
+function crc32Buffer(buf: Buffer): number {
+  let crc = 0xffffffff;
+  for (let i = 0; i < buf.length; i++) {
+    crc = CRC32_TABLE[(crc ^ buf[i]) & 0xff] ^ (crc >>> 8);
+  }
+  return (crc ^ 0xffffffff) >>> 0;
+}
+
+function buildZipArchive(
+  entries: { name: string; data: Buffer; compress?: boolean }[]
+): Buffer {
+  const localChunks: Buffer[] = [];
+  const centralChunks: Buffer[] = [];
+  let offset = 0;
+
+  for (const entry of entries) {
+    const nameBuf = Buffer.from(entry.name, 'utf8');
+    const crc = crc32Buffer(entry.data);
+    const useDeflate = entry.compress !== false && entry.data.length > 64;
+    const compressedData = useDeflate ? deflateRawSync(entry.data) : entry.data;
+    const method = useDeflate ? 8 : 0;
+
+    const localHeader = Buffer.alloc(30 + nameBuf.length);
+    localHeader.writeUInt32LE(0x04034b50, 0);
+    localHeader.writeUInt16LE(20, 4);
+    localHeader.writeUInt16LE(0x0800, 6);
+    localHeader.writeUInt16LE(method, 8);
+    localHeader.writeUInt16LE(0, 10);
+    localHeader.writeUInt16LE(0x5421, 12);
+    localHeader.writeUInt32LE(crc, 14);
+    localHeader.writeUInt32LE(compressedData.length, 18);
+    localHeader.writeUInt32LE(entry.data.length, 22);
+    localHeader.writeUInt16LE(nameBuf.length, 26);
+    localHeader.writeUInt16LE(0, 28);
+    nameBuf.copy(localHeader, 30);
+
+    localChunks.push(localHeader, compressedData);
+
+    const centralHeader = Buffer.alloc(46 + nameBuf.length);
+    centralHeader.writeUInt32LE(0x02014b50, 0);
+    centralHeader.writeUInt16LE(20, 4);
+    centralHeader.writeUInt16LE(20, 6);
+    centralHeader.writeUInt16LE(0x0800, 8);
+    centralHeader.writeUInt16LE(method, 10);
+    centralHeader.writeUInt16LE(0, 12);
+    centralHeader.writeUInt16LE(0x5421, 14);
+    centralHeader.writeUInt32LE(crc, 16);
+    centralHeader.writeUInt32LE(compressedData.length, 20);
+    centralHeader.writeUInt32LE(entry.data.length, 24);
+    centralHeader.writeUInt16LE(nameBuf.length, 28);
+    centralHeader.writeUInt16LE(0, 30);
+    centralHeader.writeUInt16LE(0, 32);
+    centralHeader.writeUInt16LE(0, 34);
+    centralHeader.writeUInt16LE(0, 36);
+    centralHeader.writeUInt32LE(0, 38);
+    centralHeader.writeUInt32LE(offset, 42);
+    nameBuf.copy(centralHeader, 46);
+
+    centralChunks.push(centralHeader);
+    offset += localHeader.length + compressedData.length;
+  }
+
+  const centralDirBuffer = Buffer.concat(centralChunks);
+  const eocd = Buffer.alloc(22);
+  eocd.writeUInt32LE(0x06054b50, 0);
+  eocd.writeUInt16LE(0, 4);
+  eocd.writeUInt16LE(0, 6);
+  eocd.writeUInt16LE(entries.length, 8);
+  eocd.writeUInt16LE(entries.length, 10);
+  eocd.writeUInt32LE(centralDirBuffer.length, 12);
+  eocd.writeUInt32LE(offset, 16);
+  eocd.writeUInt16LE(0, 20);
+
+  return Buffer.concat([...localChunks, centralDirBuffer, eocd]);
+}
+
+function sanitizeOriginUrl(rawOrigin: string | undefined, fallbackHost: string | undefined): string {
+  const candidate = (rawOrigin ?? '').trim();
+  if (candidate) {
+    try {
+      const parsed = new URL(candidate);
+      if (parsed.protocol === 'https:' || parsed.protocol === 'http:') {
+        return parsed.origin;
+      }
+    } catch {
+      // Fallback below
+    }
+  }
+  const host = fallbackHost || 'localhost:3000';
+  const proto = host.startsWith('localhost') || host.startsWith('127.') ? 'http' : 'https';
+  return `${proto}://${host}`;
+}
+
 async function startServer() {
   const app = express();
+  const httpServer = http.createServer(app);
   app.use(express.json());
+
+  app.get('/api/mobile/android-apk-kit.zip', (req, res) => {
+    const originUrl = sanitizeOriginUrl(
+      typeof req.query.origin === 'string' ? req.query.origin : req.get('origin'),
+      req.get('host')
+    );
+    const parsed = new URL(originUrl);
+    const hostOnly = parsed.host;
+
+    const twaManifest = {
+      packageId: 'com.hyundai.pleos.motionguard',
+      host: hostOnly,
+      name: 'Pleos Smart Motion Guard',
+      launcherName: 'PleosGuard',
+      display: 'standalone',
+      themeColor: '#002C5F',
+      themeColorDark: '#0D1014',
+      navigationColor: '#0D1014',
+      navigationColorDark: '#0D1014',
+      navigationDividerColor: '#0D1014',
+      navigationDividerColorDark: '#0D1014',
+      backgroundColor: '#0D1014',
+      enableNotifications: true,
+      startUrl: '/',
+      iconUrl: `${originUrl}/pwa-512x512.png`,
+      maskableIconUrl: `${originUrl}/pwa-maskable-512x512.png`,
+      monochromeIconUrl: `${originUrl}/icon.svg`,
+      shortcuts: [],
+      signingKey: {
+        path: './android.keystore',
+        alias: 'pleosguard',
+      },
+      appVersionName: '1.0.0',
+      appVersionCode: 1,
+      fallbackType: 'customtabs',
+      enableSiteSettingsShortcut: 'true',
+      isChromeOSOnly: false,
+      orientation: 'default',
+      minSdkVersion: 23,
+    };
+
+    const capacitorConfig = {
+      appId: 'com.hyundai.pleos.motionguard',
+      appName: 'Pleos Smart Motion Guard',
+      webDir: 'dist',
+      server: {
+        url: originUrl,
+        cleartext: parsed.protocol === 'http:',
+      },
+      android: {
+        backgroundColor: '#0D1014',
+      },
+    };
+
+    const pkgJson = {
+      name: 'pleos-smart-motion-guard-android',
+      version: '1.0.0',
+      private: true,
+      scripts: {
+        'twa:init': `npx @bubblewrap/cli init --manifest=${originUrl}/manifest.webmanifest`,
+        'twa:build': 'npx @bubblewrap/cli build',
+        'cap:sync': 'npx cap sync android',
+      },
+    };
+
+    const buildScript = `#!/usr/bin/env bash
+set -euo pipefail
+
+echo "=== Pleos Smart Motion Guard Android APK Builder ==="
+echo "Target App URL: ${originUrl}"
+
+if ! command -v node >/dev/null 2>&1; then
+  echo "Error: Node.js 18+ is required."
+  exit 1
+fi
+
+echo "1) Initializing Bubblewrap TWA project (JDK & Android SDK will auto-setup if prompted)..."
+npx --yes @bubblewrap/cli build
+
+echo "Done! Check app-release-signed.apk in the output directory."
+`;
+
+    const readmeMd = `# Pleos Smart Motion Guard — Android APK 빌드 키트
+
+연결된 앱 URL: \`${originUrl}\`
+
+## 방법 1: PWABuilder로 1분 만에 서명된 APK 생성 (권장, 설치 불필요)
+1. [PWABuilder](https://www.pwabuilder.com/) 접속
+2. URL 입력란에 아래 주소를 입력 후 **Start** 클릭:
+   \`${originUrl}\`
+3. **Package For Stores → Android → Generate Package** 선택
+4. 다운로드한 압축 파일 내 \`*.apk\` 파일을 Android 스마트폰으로 전송해 설치하세요.
+
+## 방법 2: 로컬 PC에서 Bubblewrap CLI로 직접 APK 컴파일
+\`\`\`bash
+chmod +x build-apk.sh
+./build-apk.sh
+\`\`\`
+생성 완료 후 \`app-release-signed.apk\`가 생성됩니다.
+
+## 방법 3: 스마트폰에서 즉시 설치 (WebAPK)
+Android Chrome에서 \`${originUrl}\` 접속 후 메뉴(⋮) → **앱 설치** 또는 **홈 화면에 추가**를 선택하면 Play Store APK와 동일한 독립 앱(WebAPK)으로 설치됩니다.
+`;
+
+    const entries: { name: string; data: Buffer; compress?: boolean }[] = [
+      { name: 'twa-manifest.json', data: Buffer.from(JSON.stringify(twaManifest, null, 2), 'utf8') },
+      { name: 'capacitor.config.json', data: Buffer.from(JSON.stringify(capacitorConfig, null, 2), 'utf8') },
+      { name: 'package.json', data: Buffer.from(JSON.stringify(pkgJson, null, 2), 'utf8') },
+      { name: 'build-apk.sh', data: Buffer.from(buildScript, 'utf8') },
+      { name: 'README-ANDROID-APK.md', data: Buffer.from(readmeMd, 'utf8') },
+    ];
+
+    const iconAssets = [
+      { disk: path.resolve(__dirname, 'public', 'pwa-512x512.png'), zipName: 'assets/icon-512.png', compress: false },
+      { disk: path.resolve(__dirname, 'public', 'pwa-maskable-512x512.png'), zipName: 'assets/icon-maskable-512.png', compress: false },
+      { disk: path.resolve(__dirname, 'public', 'icon.svg'), zipName: 'assets/icon.svg', compress: true },
+    ];
+
+    for (const asset of iconAssets) {
+      if (fs.existsSync(asset.disk)) {
+        entries.push({
+          name: asset.zipName,
+          data: fs.readFileSync(asset.disk),
+          compress: asset.compress,
+        });
+      }
+    }
+
+    const zipBuffer = buildZipArchive(entries);
+    res.setHeader('Content-Type', 'application/zip');
+    res.setHeader(
+      'Content-Disposition',
+      'attachment; filename="pleos-motion-guard-android-apk-kit.zip"'
+    );
+    res.setHeader('Content-Length', String(zipBuffer.length));
+    res.send(zipBuffer);
+  });
 
   app.get('/api/traffic/corridor', async (_req, res) => {
     const nowMs = Date.now();
@@ -645,26 +891,11 @@ async function startServer() {
   if (process.env.NODE_ENV !== 'production') {
     const { createServer } = await import('vite');
     const vite = await createServer({
-      plugins: [
-        {
-          name: 'disable-hmr-websocket-client',
-          transform(code: string, id: string) {
-            if (id.includes('vite/dist/client/client.mjs')) {
-              return {
-                code: code.replace(
-                  'transport.connect(createHMRHandler(handleMessage));',
-                  '/* HMR WebSocket disabled */'
-                ),
-                map: null,
-              };
-            }
-          },
-        },
-      ],
       server: {
         middlewareMode: true,
-        hmr: false,
-        ws: false,
+        hmr: {
+          server: httpServer,
+        },
       },
       appType: 'spa',
     });
@@ -678,7 +909,7 @@ async function startServer() {
   }
 
   const port = 3000;
-  app.listen(port, '0.0.0.0', () => {
+  httpServer.listen(port, '0.0.0.0', () => {
     console.log(`Pleos Smart Motion Guard listening on http://0.0.0.0:${port}`);
   });
 }
